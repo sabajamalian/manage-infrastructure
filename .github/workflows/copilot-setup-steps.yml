@@ -11,6 +11,11 @@ on:
         description: SRE Agent name for an optional read-only connection check
         required: false
         type: string
+      create_test_thread:
+        description: Create a read-only investigation thread, which can incur charges
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -25,17 +30,31 @@ jobs:
       id-token: write
     steps:
       - name: Validate identity configuration
+        id: identity
         env:
-          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
-          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ACTIONS_AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ACTIONS_AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ACTIONS_AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -z "$AZURE_CLIENT_ID" || -z "$AZURE_TENANT_ID" || -z "$AZURE_SUBSCRIPTION_ID" ]]; then
+          client_id="${AZURE_CLIENT_ID:-$ACTIONS_AZURE_CLIENT_ID}"
+          tenant_id="${AZURE_TENANT_ID:-$ACTIONS_AZURE_TENANT_ID}"
+          subscription_id="${AZURE_SUBSCRIPTION_ID:-$ACTIONS_AZURE_SUBSCRIPTION_ID}"
+          if [[ -z "$client_id" || -z "$tenant_id" || -z "$subscription_id" ]]; then
             echo "::error::Configure AZURE_CLIENT_ID, AZURE_TENANT_ID and AZURE_SUBSCRIPTION_ID for Copilot."
             exit 1
           fi
+          guid='^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$'
+          if [[ ! "$client_id" =~ $guid || ! "$tenant_id" =~ $guid || ! "$subscription_id" =~ $guid ]]; then
+            echo "::error::The configured Azure client, tenant and subscription IDs must be GUIDs."
+            exit 1
+          fi
+          {
+            printf 'client_id=%s\n' "$client_id"
+            printf 'tenant_id=%s\n' "$tenant_id"
+            printf 'subscription_id=%s\n' "$subscription_id"
+          } >> "$GITHUB_OUTPUT"
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
@@ -43,9 +62,9 @@ jobs:
       - name: Azure federated login
         uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ steps.identity.outputs.client_id }}
+          tenant-id: ${{ steps.identity.outputs.tenant_id }}
+          subscription-id: ${{ steps.identity.outputs.subscription_id }}
       - name: Verify ARM and SRE credential acquisition
         shell: bash
         run: |
@@ -53,12 +72,13 @@ jobs:
           az account get-access-token --resource https://management.azure.com/ --query expiresOn -o tsv >/dev/null
           az account get-access-token --resource 59f0a04a-b322-4310-adc9-39ac41e9631e --query expiresOn -o tsv >/dev/null
       - name: Verify SRE access on manual dispatch
-        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.resource_group != '' || inputs.agent_name != '') }}
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.resource_group != '' || inputs.agent_name != '' || inputs.create_test_thread) }}
         env:
           AZURE_TOKEN_CREDENTIALS: AzureCliCredential
-          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ steps.identity.outputs.subscription_id }}
           SRE_RESOURCE_GROUP: ${{ inputs.resource_group }}
           SRE_AGENT_NAME: ${{ inputs.agent_name }}
+          SRE_CREATE_TEST_THREAD: ${{ inputs.create_test_thread }}
         shell: bash
         run: |
           set -euo pipefail
@@ -80,3 +100,34 @@ jobs:
             exit 1
           fi
           echo "Azure MCP agent discovery and thread access succeeded."
+          if [[ "$SRE_CREATE_TEST_THREAD" == "true" ]]; then
+            message="Check the current provisioning and running state of SRE Agent $SRE_AGENT_NAME in resource group $SRE_RESOURCE_GROUP. Investigate and report evidence only. Do not change infrastructure, incident state, schedules, permissions, connectors, or knowledge. Pause for human authorization rather than taking remediation actions."
+            if ! result="$(npx -y @azure/mcp@4.0.0-beta.9 sreagent threads create \
+              --subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$SRE_RESOURCE_GROUP" \
+              --agent "$SRE_AGENT_NAME" --message "$message")"; then
+              echo "::error::Thread creation failed; check existing threads before retrying because the outcome may be unknown."
+              exit 1
+            fi
+            if ! status="$(jq -er '.status | numbers' <<< "$result")"; then
+              echo "::error::Thread creation returned no status; check existing threads before retrying."
+              exit 1
+            fi
+            if [[ "$status" != "200" ]]; then
+              echo "::error::Thread creation returned status $status; check existing threads before retrying."
+              exit 1
+            fi
+            if ! thread_id="$(jq -er '.results.threadId | strings | select(length > 0)' <<< "$result")"; then
+              echo "::error::Thread creation returned no thread ID; check existing threads before retrying."
+              exit 1
+            fi
+            echo "Created SRE investigation thread: $thread_id"
+            if ! npx -y @azure/mcp@4.0.0-beta.9 sreagent threads get \
+              --subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$SRE_RESOURCE_GROUP" \
+              --agent "$SRE_AGENT_NAME" --thread-id "$thread_id" |
+              jq -e --arg thread "$thread_id" \
+                '(.status == 200) and (.results.threadId == $thread) and ((.results.messages | type) == "array")' >/dev/null; then
+              echo "::error::Could not retrieve the created SRE investigation thread."
+              exit 1
+            fi
+            echo "SRE thread retrieval succeeded; inspect the thread for final results."
+          fi

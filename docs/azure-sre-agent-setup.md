@@ -196,11 +196,12 @@ doesn't expose the Azure managed-identity metadata endpoint: use federated
 GitHub documents migration from old `copilot` environment secrets/variables to
 Agents settings. Only Agents values are passed into actual Copilot sessions;
 ordinary Actions secrets are not a substitute. The committed workflow follows
-Microsoft's `vars.*` login template. When testing with ordinary
-`workflow_dispatch`, also make the same three non-secret values available as
-Actions variables in the `copilot` environment; ordinary Actions runs don't
-automatically receive Agents variables. Confirm the effective values in the
-actual Copilot setup logs without dumping the environment.
+GitHub's documented environment-variable injection for Copilot sessions. When
+testing with ordinary `workflow_dispatch`, also make the same three non-secret
+values available as Actions variables in the `copilot` environment; ordinary
+Actions runs don't automatically receive Agents variables. The workflow falls
+back to those Actions variables when injected Agents variables are absent.
+Confirm the effective setup in Copilot logs without dumping the environment.
 
 ### 4. Merge and select
 
@@ -348,14 +349,19 @@ agent discovery and thread-list access without creating a thread. A successful
 ordinary Actions run does not prove that an actual Copilot session has the same
 configuration or can complete an investigation.
 
+To also create and retrieve a bounded, read-only investigation thread, add
+`-f create_test_thread=true`. This stores a thread and can incur Azure SRE Agent
+charges. Inspect the returned thread ID for the final result; successful creation
+and retrieval alone don't prove the investigation finished.
+
 | Test | Local result / remaining integration evidence |
 | --- | --- |
 | 1. Discovery | Profile parsed and validated; GitHub.com dropdown, issue selection and PR version continuity not tested. |
 | 2. Initialization | Passed: real server 4.0.0-beta.9, 55 inventory tools, exactly 22 filtered tools. Actions startup logs not tested. |
 | 3. Authentication | Local preflight tests cover missing and present values. Verify GitHub OIDC, both token audiences and SRE authorization in the target environment. |
 | 4. Agent discovery | Run the optional manual SRE connection check and ask an actual Copilot session to list agents; verify resource scope and ambiguity handling. |
-| 5. Investigation | Not tested. Explicitly authorize a nonproduction investigation, verify standard mode and retain its thread ID. |
-| 6. Results | Not tested. Read/resume that thread and check every finding against returned records. |
+| 5. Investigation | Start a bounded nonproduction investigation in the target Copilot session, verify standard mode and retain its thread ID. |
+| 6. Results | Read or resume that thread and check every finding against returned records. |
 | 7. Correlation | Not tested against real incidents. Adopt in a repository with application/IaC and link evidence to real deployment commits. This repository started empty. |
 | 8. Boundaries | Passed local checks rejecting YOLO, wildcard/extra tools, dangerous flags and extra workflow privileges. Live RBAC and SRE gates not tested; direct mutation approval is not technically enforced. |
 | 9. Failures | Passed local tests for pagination, protocol errors, timeout propagation and malformed/missing tools. Actual expired tokens, unavailable agents and approval behavior not tested. |

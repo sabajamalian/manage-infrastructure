@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, rmdir } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { parseProfile, parseYaml, validateProfile, validateWorkflow,
   listAllTools, validateInventory } from './validate-azure-sre.mjs';
@@ -78,19 +80,57 @@ test('manual SRE access check remains dispatch-only and uses the pinned MCP vers
 
 test('setup preflight fails without configuration and does not print identity values', () => {
   const preflight = workflow.jobs['copilot-setup-steps'].steps[0].run;
+  const fallback = { ACTIONS_AZURE_CLIENT_ID: '', ACTIONS_AZURE_TENANT_ID: '',
+    ACTIONS_AZURE_SUBSCRIPTION_ID: '', GITHUB_OUTPUT: '/dev/null' };
   const empty = spawnSync('bash', ['-c', preflight], {
-    env: { PATH: process.env.PATH, AZURE_CLIENT_ID: '', AZURE_TENANT_ID: '', AZURE_SUBSCRIPTION_ID: '' },
+    env: { PATH: process.env.PATH, ...fallback, AZURE_CLIENT_ID: '', AZURE_TENANT_ID: '', AZURE_SUBSCRIPTION_ID: '' },
     encoding: 'utf8',
   });
   assert.equal(empty.status, 1);
   assert.match(empty.stdout, /::error::Configure/);
   const present = spawnSync('bash', ['-c', preflight], {
-    env: { PATH: process.env.PATH, AZURE_CLIENT_ID: 'test-client',
-      AZURE_TENANT_ID: 'test-tenant', AZURE_SUBSCRIPTION_ID: 'test-subscription' },
+    env: { PATH: process.env.PATH, ...fallback,
+      AZURE_CLIENT_ID: '00000000-0000-0000-0000-000000000001',
+      AZURE_TENANT_ID: '00000000-0000-0000-0000-000000000002',
+      AZURE_SUBSCRIPTION_ID: '00000000-0000-0000-0000-000000000003' },
     encoding: 'utf8',
   });
   assert.equal(present.status, 0);
   assert.equal(present.stdout, '');
+  const invalid = spawnSync('bash', ['-c', preflight], {
+    env: { PATH: process.env.PATH, ...fallback,
+      AZURE_CLIENT_ID: '00000000-0000-0000-0000-000000000001\ninjected=value',
+      AZURE_TENANT_ID: '00000000-0000-0000-0000-000000000002',
+      AZURE_SUBSCRIPTION_ID: '00000000-0000-0000-0000-000000000003' },
+    encoding: 'utf8',
+  });
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stdout, /must be GUIDs/);
+});
+
+test('setup uses injected Agents variables before the Actions variable fallback', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'azure-sre-output-'));
+  try {
+    const output = join(dir, 'output');
+    const result = spawnSync('bash', ['-c', workflow.jobs['copilot-setup-steps'].steps[0].run], {
+      env: { PATH: process.env.PATH, GITHUB_OUTPUT: output,
+        AZURE_CLIENT_ID: '00000000-0000-0000-0000-000000000001',
+        AZURE_TENANT_ID: '00000000-0000-0000-0000-000000000002',
+        AZURE_SUBSCRIPTION_ID: '00000000-0000-0000-0000-000000000003',
+        ACTIONS_AZURE_CLIENT_ID: '00000000-0000-0000-0000-000000000004',
+        ACTIONS_AZURE_TENANT_ID: '00000000-0000-0000-0000-000000000005',
+        ACTIONS_AZURE_SUBSCRIPTION_ID: '00000000-0000-0000-0000-000000000006' },
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 0);
+    assert.equal(await readFile(output, 'utf8'),
+      'client_id=00000000-0000-0000-0000-000000000001\n' +
+      'tenant_id=00000000-0000-0000-0000-000000000002\n' +
+      'subscription_id=00000000-0000-0000-0000-000000000003\n');
+  } finally {
+    await rm(join(dir, 'output'), { force: true });
+    await rmdir(dir);
+  }
 });
 
 test('tool discovery consumes every page and rejects pagination loops', async () => {

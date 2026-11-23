@@ -72,11 +72,14 @@ export function validateWorkflow(workflow, version) {
   assert.deepEqual(Object.keys(workflow.on ?? {}), ['workflow_dispatch'],
     'Do not run identity setup on untrusted PR/push events');
   const inputs = workflow.on.workflow_dispatch?.inputs;
-  assert.deepEqual(Object.keys(inputs ?? {}), ['resource_group', 'agent_name']);
-  for (const input of Object.values(inputs)) {
-    assert.equal(input.type, 'string');
-    assert.equal(input.required, false);
+  assert.deepEqual(Object.keys(inputs ?? {}), ['resource_group', 'agent_name', 'create_test_thread']);
+  for (const name of ['resource_group', 'agent_name']) {
+    assert.equal(inputs[name].type, 'string');
+    assert.equal(inputs[name].required, false);
   }
+  assert.equal(inputs.create_test_thread.type, 'boolean');
+  assert.equal(inputs.create_test_thread.required, false);
+  assert.equal(inputs.create_test_thread.default, false);
   assert.deepEqual(workflow.permissions, { contents: 'read' });
   assert.deepEqual(Object.keys(workflow.jobs ?? {}), ['copilot-setup-steps']);
   const job = workflow.jobs['copilot-setup-steps'];
@@ -86,8 +89,9 @@ export function validateWorkflow(workflow, version) {
   assert.deepEqual(job.permissions, { contents: 'read', 'id-token': 'write' });
   const validation = job.steps[0];
   assert.equal(validation.shell, 'bash');
+  assert.equal(validation.id, 'identity');
   const variables = ['AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID'];
-  assert.deepEqual(validation.env, Object.fromEntries(variables.map(name => [name, `\${{ vars.${name} }}`])));
+  assert.deepEqual(validation.env, Object.fromEntries(variables.map(name => [`ACTIONS_${name}`, `\${{ vars.${name} }}`])));
   assert.ok(validation.run.includes('exit 1') && validation.run.includes('set -euo pipefail'));
   const setup = job.steps.find(step => step.uses?.startsWith('actions/setup-node@'));
   assert.ok(setup, 'Node.js 22+ setup required');
@@ -97,9 +101,9 @@ export function validateWorkflow(workflow, version) {
   assert.ok(login, 'Federated Azure login is required');
   assert.match(login.uses, /^azure\/login@[a-f0-9]{40}$/);
   assert.deepEqual(login.with, {
-    'client-id': '${{ vars.AZURE_CLIENT_ID }}',
-    'tenant-id': '${{ vars.AZURE_TENANT_ID }}',
-    'subscription-id': '${{ vars.AZURE_SUBSCRIPTION_ID }}',
+    'client-id': '${{ steps.identity.outputs.client_id }}',
+    'tenant-id': '${{ steps.identity.outputs.tenant_id }}',
+    'subscription-id': '${{ steps.identity.outputs.subscription_id }}',
   }, 'Only non-secret OIDC identity values are permitted');
   assert.ok(job.steps.every(step => !step['continue-on-error']), 'Setup must not hide authentication failures');
   assert.equal(job.steps.length, 5, 'Unreviewed setup step');
@@ -108,16 +112,19 @@ export function validateWorkflow(workflow, version) {
     tokens.run.includes('59f0a04a-b322-4310-adc9-39ac41e9631e') &&
     tokens.run.includes('--query expiresOn'), 'Check both token audiences without printing tokens');
   const live = job.steps[4];
-  assert.equal(live.if, "${{ github.event_name == 'workflow_dispatch' && (inputs.resource_group != '' || inputs.agent_name != '') }}");
+  assert.equal(live.if, "${{ github.event_name == 'workflow_dispatch' && (inputs.resource_group != '' || inputs.agent_name != '' || inputs.create_test_thread) }}");
   assert.equal(live.shell, 'bash');
   assert.deepEqual(live.env, {
     AZURE_TOKEN_CREDENTIALS: 'AzureCliCredential',
-    AZURE_SUBSCRIPTION_ID: '${{ vars.AZURE_SUBSCRIPTION_ID }}',
+    AZURE_SUBSCRIPTION_ID: '${{ steps.identity.outputs.subscription_id }}',
     SRE_RESOURCE_GROUP: '${{ inputs.resource_group }}',
     SRE_AGENT_NAME: '${{ inputs.agent_name }}',
+    SRE_CREATE_TEST_THREAD: '${{ inputs.create_test_thread }}',
   });
   assert.ok(live.run.includes(`@azure/mcp@${version} sreagent agents list`) &&
     live.run.includes(`@azure/mcp@${version} sreagent threads list`) &&
+    live.run.includes(`@azure/mcp@${version} sreagent threads create`) &&
+    live.run.includes(`@azure/mcp@${version} sreagent threads get`) &&
     !live.run.includes('${{ inputs.'), 'The manual check must use the pinned server and quoted input environment variables');
 }
 
