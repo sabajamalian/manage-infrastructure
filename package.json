@@ -1,0 +1,19 @@
+{
+  "name": "azure-sre-agent-validation",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test scripts/validate-azure-sre.test.mjs",
+    "validate": "node scripts/validate-azure-sre.mjs",
+    "validate:mcp": "node scripts/validate-azure-sre.mjs --mcp",
+    "inventory:mcp": "node scripts/validate-azure-sre.mjs --inventory"
+  },
+  "devDependencies": {
+    "@azure/mcp": "4.0.0-beta.9",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "yaml": "2.9.1"
+  }
+}
