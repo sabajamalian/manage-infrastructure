@@ -68,8 +68,15 @@ export function validateProfile(profile, version) {
   return server;
 }
 
-export function validateWorkflow(workflow) {
-  assert.deepEqual(workflow.on, { workflow_dispatch: null }, 'Do not run identity setup on untrusted PR/push events');
+export function validateWorkflow(workflow, version) {
+  assert.deepEqual(Object.keys(workflow.on ?? {}), ['workflow_dispatch'],
+    'Do not run identity setup on untrusted PR/push events');
+  const inputs = workflow.on.workflow_dispatch?.inputs;
+  assert.deepEqual(Object.keys(inputs ?? {}), ['resource_group', 'agent_name']);
+  for (const input of Object.values(inputs)) {
+    assert.equal(input.type, 'string');
+    assert.equal(input.required, false);
+  }
   assert.deepEqual(workflow.permissions, { contents: 'read' });
   assert.deepEqual(Object.keys(workflow.jobs ?? {}), ['copilot-setup-steps']);
   const job = workflow.jobs['copilot-setup-steps'];
@@ -95,11 +102,23 @@ export function validateWorkflow(workflow) {
     'subscription-id': '${{ vars.AZURE_SUBSCRIPTION_ID }}',
   }, 'Only non-secret OIDC identity values are permitted');
   assert.ok(job.steps.every(step => !step['continue-on-error']), 'Setup must not hide authentication failures');
-  assert.equal(job.steps.length, 4, 'Unreviewed setup step');
-  const tokens = job.steps.at(-1);
+  assert.equal(job.steps.length, 5, 'Unreviewed setup step');
+  const tokens = job.steps[3];
   assert.ok(tokens.run.includes('https://management.azure.com/') &&
     tokens.run.includes('59f0a04a-b322-4310-adc9-39ac41e9631e') &&
     tokens.run.includes('--query expiresOn'), 'Check both token audiences without printing tokens');
+  const live = job.steps[4];
+  assert.equal(live.if, "${{ github.event_name == 'workflow_dispatch' && (inputs.resource_group != '' || inputs.agent_name != '') }}");
+  assert.equal(live.shell, 'bash');
+  assert.deepEqual(live.env, {
+    AZURE_TOKEN_CREDENTIALS: 'AzureCliCredential',
+    AZURE_SUBSCRIPTION_ID: '${{ vars.AZURE_SUBSCRIPTION_ID }}',
+    SRE_RESOURCE_GROUP: '${{ inputs.resource_group }}',
+    SRE_AGENT_NAME: '${{ inputs.agent_name }}',
+  });
+  assert.ok(live.run.includes(`@azure/mcp@${version} sreagent agents list`) &&
+    live.run.includes(`@azure/mcp@${version} sreagent threads list`) &&
+    !live.run.includes('${{ inputs.'), 'The manual check must use the pinned server and quoted input environment variables');
 }
 
 export async function listAllTools(client) {
@@ -155,7 +174,7 @@ async function main() {
   const version = manifest.devDependencies['@azure/mcp'];
   const profile = parseProfile(await readFile(resolve(root, '.github/agents/azure-sre.agent.md'), 'utf8'));
   const server = validateProfile(profile, version);
-  validateWorkflow(parseYaml(await readFile(resolve(root, '.github/workflows/copilot-setup-steps.yml'), 'utf8')));
+  validateWorkflow(parseYaml(await readFile(resolve(root, '.github/workflows/copilot-setup-steps.yml'), 'utf8')), version);
   const mode = process.argv[2];
   assert.ok([undefined, '--mcp', '--inventory'].includes(mode), 'Use --mcp or --inventory');
   if (mode === '--inventory') {

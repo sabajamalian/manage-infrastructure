@@ -38,20 +38,42 @@ test('rejects credential changes, duplicate keys and unsupported frontmatter', (
 });
 
 test('rejects untrusted workflow events and excess token permissions', () => {
-  assert.throws(() => validateWorkflow({ ...workflow, on: { pull_request: null } }), /untrusted/);
+  assert.throws(() => validateWorkflow({ ...workflow, on: { pull_request: null } }, version), /untrusted/);
   const changed = structuredClone(workflow);
   changed.jobs['copilot-setup-steps'].permissions.contents = 'write';
-  assert.throws(() => validateWorkflow(changed));
+  assert.throws(() => validateWorkflow(changed, version));
 });
 
 test('rejects secret-based login and floating action tags', () => {
   const changed = structuredClone(workflow);
   const login = changed.jobs['copilot-setup-steps'].steps.find(step => step.uses?.startsWith('azure/login@'));
   login.with.creds = '${{ secrets.AZURE_CREDENTIALS }}';
-  assert.throws(() => validateWorkflow(changed), /OIDC identity/);
+  assert.throws(() => validateWorkflow(changed, version), /OIDC identity/);
   delete login.with.creds;
   login.uses = 'azure/login@v3';
-  assert.throws(() => validateWorkflow(changed));
+  assert.throws(() => validateWorkflow(changed, version));
+});
+
+test('manual SRE access check rejects an incomplete target before invoking Azure', () => {
+  const check = workflow.jobs['copilot-setup-steps'].steps.at(-1).run;
+  for (const [resourceGroup, agentName] of [['group', ''], ['', 'agent']]) {
+    const result = spawnSync('bash', ['-c', check], {
+      env: { PATH: process.env.PATH, SRE_RESOURCE_GROUP: resourceGroup,
+        SRE_AGENT_NAME: agentName, AZURE_SUBSCRIPTION_ID: 'test-subscription' },
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /::error::Provide both/);
+  }
+});
+
+test('manual SRE access check remains dispatch-only and uses the pinned MCP version', () => {
+  const changed = structuredClone(workflow);
+  changed.jobs['copilot-setup-steps'].steps.at(-1).if = '${{ true }}';
+  assert.throws(() => validateWorkflow(changed, version));
+  changed.jobs['copilot-setup-steps'].steps.at(-1).if = workflow.jobs['copilot-setup-steps'].steps.at(-1).if;
+  changed.jobs['copilot-setup-steps'].steps.at(-1).run = 'npx @azure/mcp@latest';
+  assert.throws(() => validateWorkflow(changed, version), /pinned server/);
 });
 
 test('setup preflight fails without configuration and does not print identity values', () => {

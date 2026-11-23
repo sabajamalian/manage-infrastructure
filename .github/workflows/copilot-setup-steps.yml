@@ -2,6 +2,15 @@ name: Copilot Azure SRE setup
 
 on:
   workflow_dispatch:
+    inputs:
+      resource_group:
+        description: Resource group for an optional read-only SRE connection check
+        required: false
+        type: string
+      agent_name:
+        description: SRE Agent name for an optional read-only connection check
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -43,3 +52,31 @@ jobs:
           set -euo pipefail
           az account get-access-token --resource https://management.azure.com/ --query expiresOn -o tsv >/dev/null
           az account get-access-token --resource 59f0a04a-b322-4310-adc9-39ac41e9631e --query expiresOn -o tsv >/dev/null
+      - name: Verify SRE access on manual dispatch
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.resource_group != '' || inputs.agent_name != '') }}
+        env:
+          AZURE_TOKEN_CREDENTIALS: AzureCliCredential
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          SRE_RESOURCE_GROUP: ${{ inputs.resource_group }}
+          SRE_AGENT_NAME: ${{ inputs.agent_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$SRE_RESOURCE_GROUP" || -z "$SRE_AGENT_NAME" ]]; then
+            echo "::error::Provide both resource_group and agent_name for the SRE connection check."
+            exit 1
+          fi
+          if ! npx -y @azure/mcp@4.0.0-beta.9 sreagent agents list \
+            --subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$SRE_RESOURCE_GROUP" |
+            jq -e --arg agent "$SRE_AGENT_NAME" \
+              '(.status == 200) and any(.results.agents[]?; .name == $agent and .provisioningState == "Succeeded")' >/dev/null; then
+            echo "::error::Azure MCP could not discover the selected, provisioned SRE Agent."
+            exit 1
+          fi
+          if ! npx -y @azure/mcp@4.0.0-beta.9 sreagent threads list \
+            --subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$SRE_RESOURCE_GROUP" --agent "$SRE_AGENT_NAME" |
+            jq -e '(.status == 200) and ((.results.threads | type) == "array")' >/dev/null; then
+            echo "::error::Azure MCP could not read SRE Agent threads."
+            exit 1
+          fi
+          echo "Azure MCP agent discovery and thread access succeeded."

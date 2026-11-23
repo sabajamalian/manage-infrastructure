@@ -335,12 +335,25 @@ the production profile never exposes that dispatcher/full set.
 The lockfile pins validation dependencies; cloud `npx` pins the server version
 but still downloads its distribution and transitive runtime dependencies.
 
+After configuring federation and the Actions environment variables, run a
+read-only check of the selected agent with the federated caller identity:
+
+```shell
+gh workflow run copilot-setup-steps.yml --ref main \
+  -f resource_group='<resource-group>' -f agent_name='<agent-name>'
+```
+
+Provide both inputs. The optional step uses the pinned Azure MCP CLI to check
+agent discovery and thread-list access without creating a thread. A successful
+ordinary Actions run does not prove that an actual Copilot session has the same
+configuration or can complete an investigation.
+
 | Test | Local result / remaining integration evidence |
 | --- | --- |
 | 1. Discovery | Profile parsed and validated; GitHub.com dropdown, issue selection and PR version continuity not tested. |
 | 2. Initialization | Passed: real server 4.0.0-beta.9, 55 inventory tools, exactly 22 filtered tools. Actions startup logs not tested. |
-| 3. Authentication | Preflight missing/present-variable tests passed; actual GitHub OIDC, both token audiences and SRE authorization not tested. |
-| 4. Agent discovery | Not tested against Azure. In a configured Actions session ask to list agents only; verify resource scope and ambiguity handling. |
+| 3. Authentication | Local preflight tests cover missing and present values. Verify GitHub OIDC, both token audiences and SRE authorization in the target environment. |
+| 4. Agent discovery | Run the optional manual SRE connection check and ask an actual Copilot session to list agents; verify resource scope and ambiguity handling. |
 | 5. Investigation | Not tested. Explicitly authorize a nonproduction investigation, verify standard mode and retain its thread ID. |
 | 6. Results | Not tested. Read/resume that thread and check every finding against returned records. |
 | 7. Correlation | Not tested against real incidents. Adopt in a repository with application/IaC and link evidence to real deployment commits. This repository started empty. |
